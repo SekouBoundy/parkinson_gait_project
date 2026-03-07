@@ -1,5 +1,5 @@
 """
-utils.py — Shared helpers used across the pipeline.
+utils.py — Shared helper functions used across the pipeline.
 """
 
 import os
@@ -12,7 +12,7 @@ import numpy as np
 # ──────────────────────────────────────────────
 
 def ensure_dir(path: str) -> None:
-    """Create directory (and parents) if it does not already exist."""
+    """Create a directory (and all parents) if it does not already exist."""
     os.makedirs(path, exist_ok=True)
 
 
@@ -21,17 +21,22 @@ def ensure_dir(path: str) -> None:
 # ──────────────────────────────────────────────
 
 def save_json(data: dict, path: str) -> None:
-    """Serialize *data* to a JSON file at *path*."""
+    """
+    Save a dictionary to a JSON file.
+
+    Parameters
+    ----------
+    data : dict   Any JSON-serialisable dictionary.
+    path : str    Full file path to write to.
+    """
     ensure_dir(os.path.dirname(path))
-    with open(path, "w", encoding="latin-1") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
 def load_json(path: str) -> dict:
-    """Load and return a JSON file as a dict."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"JSON file not found: {path}")
-    with open(path, "r", encoding="latin-1") as f:
+    """Load and return a JSON file as a Python dictionary."""
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -39,53 +44,41 @@ def load_json(path: str) -> dict:
 # Array validation
 # ──────────────────────────────────────────────
 
-def assert_3d(arr: np.ndarray, name: str = "X") -> None:
-    """Raise ValueError if *arr* is not 3-dimensional."""
-    if arr.ndim != 3:
+def validate_X_y(X: np.ndarray, y: np.ndarray) -> None:
+    """
+    Assert that X and y have the expected shapes for the deep-learning pipeline:
+      X : (N, window_size, features)  — 3-D
+      y : (N,)                        — 1-D
+    Raises ValueError with a clear message on any violation.
+    """
+    if X.ndim != 3:
         raise ValueError(
-            f"Expected {name} to be 3-D (N, window, features), "
-            f"got shape {arr.shape}"
+            f"X must be 3-D (N, window_size, features), got shape {X.shape}"
         )
-
-
-def assert_1d(arr: np.ndarray, name: str = "y") -> None:
-    """Raise ValueError if *arr* is not 1-dimensional."""
-    if arr.ndim != 1:
+    if y.ndim != 1:
         raise ValueError(
-            f"Expected {name} to be 1-D (N,), got shape {arr.shape}"
+            f"y must be 1-D (N,), got shape {y.shape}"
         )
-
-
-def assert_lengths_match(a: np.ndarray, b: np.ndarray,
-                          name_a: str = "X", name_b: str = "y") -> None:
-    """Raise ValueError if first dimensions of *a* and *b* differ."""
-    if a.shape[0] != b.shape[0]:
+    if X.shape[0] != y.shape[0]:
         raise ValueError(
-            f"Length mismatch: {name_a} has {a.shape[0]} samples "
-            f"but {name_b} has {b.shape[0]}."
+            f"Sample count mismatch: X has {X.shape[0]} rows, y has {y.shape[0]} rows"
         )
+    if X.shape[0] == 0:
+        raise ValueError("X and y are empty — no windows were generated.")
 
 
 # ──────────────────────────────────────────────
-# Pretty printing
+# Pretty-print helpers
 # ──────────────────────────────────────────────
 
 def section(title: str) -> None:
-    """Print a visible section header to stdout."""
-    bar = "─" * 52
-    print(f"\n{bar}\n  {title}\n{bar}")
+    """Print a titled section divider to stdout."""
+    bar = "─" * 56
+    print(f"\n{bar}")
+    print(f"  {title}")
+    print(bar)
 
 
-def log_info(msg: str) -> None:
-    """Print an info-level message."""
-    print(f"  [INFO]  {msg}")
-
-
-def log_warn(msg: str) -> None:
-    """Print a warning-level message."""
-    print(f"  [WARN]  {msg}")
-
-
-def log_error(msg: str) -> None:
-    """Print an error-level message."""
-    print(f"  [ERROR] {msg}")
+def kv(key: str, value) -> None:
+    """Print a single key/value line, aligned for readability."""
+    print(f"  {key:<30} {value}")
