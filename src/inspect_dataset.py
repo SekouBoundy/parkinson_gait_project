@@ -1,142 +1,147 @@
 """
-Recursively scans RAW_DIR, profiles every file, saves inspect_report.json.
+inspect_dataset.py — Quick sanity check for the raw dataset folder.
+
+Prints a readable summary without running the full pipeline.
+
 Usage:
     python -m src.inspect_dataset
     python -m src.inspect_dataset --raw_dir data/raw
 """
-import os, sys, json, logging, argparse
-from collections import defaultdict
-from pathlib import Path
+
+import os
+import sys
+import argparse
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src import config
-
-logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
-log = logging.getLogger(__name__)
-
-
-def _infer_label(file_path: Path):
-    candidate_parts = [p.lower() for p in file_path.parts[-3:-1]]
-    for label, keywords in config.LABEL_RULES.items():
-        for kw in keywords:
-            for part in candidate_parts:
-                if kw == part or kw in part:
-                    return label
-    return None
+from src.data_loader import discover_files, infer_label
+from src.utils import section, log_info, log_warn, log_error
 
 
-def _load_file(file_path: Path):
-    ext = file_path.suffix.lower()
-    if ext not in config.SUPPORTED_EXTENSIONS:
-        if ext in config.UNSUPPORTED_EXTENSIONS:
-            return None, f"Unsupported binary/WFDB format '{ext}'"
-        return None, f"Unknown extension '{ext}' � skipping"
+def inspect_file(file_path: str) -> dict | None:
+    """
+    Read one file and return basic statistics without full preprocessing.
+    Returns None if the file cannot be read.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    delimiter = "\t" if ext == ".txt" else ","
 
-    for sep in [",", "\t", " ", ";"]:
-        try:
-            df = pd.read_csv(file_path, sep=sep, header=None, comment="#")
-            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-            if not num_cols:
-                df = pd.read_csv(file_path, sep=sep, comment="#")
-                num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-            if num_cols:
-                arr = df[num_cols].to_numpy(dtype=np.float32)
-                if arr.shape[0] < 2:
-                    return None, "File has fewer than 2 rows"
-                return arr, None
-        except Exception:
-            continue
-    return None, "Could not parse file with any separator"
+    try:
+        df = pd.read_csv(
+            file_path,
+            sep=delimiter,
+            header=None,
+            comment="#",
+            engine="python",
+            on_bad_lines="warn",
+            encoding="latin-1",
+        )
+    except Exception as exc:
+        log_error(f"Cannot read {os.path.basename(file_path)}: {exc}")
+        return None
 
+    numeric_df = df.select_dtypes(include=[np.number])
 
-def inspect(raw_dir: str) -> dict:
-    raw_path = Path(raw_dir)
-    if not raw_path.exists():
-        log.error("RAW_DIR does not exist: %s", raw_path); sys.exit(1)
+    if numeric_df.empty:
+        log_warn(f"No numeric columns in: {os.path.basename(file_path)}")
+        return None
 
-    all_files = sorted([f for f in raw_path.rglob("*") if f.is_file()])
-    if not all_files:
-        log.warning("No files found in %s", raw_path)
+    try:
+        label = infer_label(file_path)
+    except ValueError:
+        label = "?"
 
-    ext_counts, loaded_shapes = defaultdict(int), []
-    missing_values, load_errors = 0, []
-    label_counts = defaultdict(int)
-    first_example = None
-
-    for fp in all_files:
-        ext_counts[fp.suffix.lower()] += 1
-
-    log.info("Found %d file(s) | Extensions: %s", len(all_files), dict(ext_counts))
-
-    for fp in all_files:
-        arr, err = _load_file(fp)
-        if err:
-            log.warning("  x %s -> %s", fp.name, err)
-            load_errors.append({"file": str(fp), "reason": err}); continue
-
-        T, C = arr.shape
-        nan_count = int(np.isnan(arr).sum())
-        missing_values += nan_count
-        loaded_shapes.append((T, C))
-        label = _infer_label(fp)
-        label_counts[str(label)] += 1
-        log.info("  OK %-40s shape=(%d,%d) NaN=%d label=%s", fp.name, T, C, nan_count, label)
-
-        if first_example is None:
-            first_example = {"file": str(fp), "shape": [T, C],
-                             "first_3_rows": arr[:3].tolist(), "label": label}
-
-    lengths  = [s[0] for s in loaded_shapes]
-    channels = [s[1] for s in loaded_shapes]
-    stats = {}
-    if lengths:
-        stats = {
-            "length_T": {"min": int(np.min(lengths)), "max": int(np.max(lengths)),
-                         "mean": float(np.mean(lengths))},
-            "channels_C": {"unique_values": sorted(set(channels))},
-        }
-
-    report = {
-        "raw_dir": str(raw_path.resolve()), "total_files": len(all_files),
-        "extension_counts": dict(ext_counts), "loaded_ok": len(loaded_shapes),
-        "load_errors": load_errors, "missing_values_total": missing_values,
-        "label_counts": dict(label_counts), "signal_stats": stats,
-        "first_example": first_example,
+    return {
+        "file":       os.path.basename(file_path),
+        "rows":       len(df),
+        "cols_total": len(df.columns),
+        "cols_num":   len(numeric_df.columns),
+        "label":      label,
+        "has_nan":    bool(numeric_df.isnull().any().any()),
+        "min":        round(float(numeric_df.min().min()), 4),
+        "max":        round(float(numeric_df.max().max()), 4),
     }
 
-    print("\n" + "="*60)
-    print("  DATASET INSPECTION REPORT")
-    print("="*60)
-    print(f"  Total files       : {len(all_files)}")
-    print(f"  Extensions        : {dict(ext_counts)}")
-    print(f"  Loaded OK         : {len(loaded_shapes)}")
-    print(f"  Failed            : {len(load_errors)}")
-    print(f"  Missing values    : {missing_values}")
-    print(f"  Label distribution: {dict(label_counts)}")
-    if stats:
-        lt = stats["length_T"]
-        print(f"  Signal length (T) : min={lt['min']}  max={lt['max']}  mean={lt['mean']:.1f}")
-        print(f"  Channels (C)      : {stats['channels_C']['unique_values']}")
-    if first_example:
-        print(f"\n  Example: {Path(first_example['file']).name}  shape={first_example['shape']}")
-        print(f"  First 3 rows:\n{np.array(first_example['first_3_rows'])}")
-    print("="*60 + "\n")
-    return report
 
+def main() -> None:
+    p = argparse.ArgumentParser(description="Inspect raw gait dataset.")
+    p.add_argument("--raw_dir", default=config.RAW_DIR)
+    args = p.parse_args()
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--raw_dir",  default=config.RAW_DIR)
-    parser.add_argument("--out_dir",  default=config.PROCESSED_DIR)
-    args = parser.parse_args()
-    report = inspect(args.raw_dir)
-    os.makedirs(args.out_dir, exist_ok=True)
-    out = os.path.join(args.out_dir, "inspect_report.json")
-    with open(out, "w") as f:
-        json.dump(report, f, indent=2)
-    log.info("Report saved -> %s", out)
+    section("Dataset Inspector")
+    log_info(f"Scanning: {args.raw_dir}\n")
+
+    try:
+        files = discover_files(args.raw_dir)
+    except FileNotFoundError as exc:
+        log_error(str(exc))
+        sys.exit(1)
+
+    log_info(f"Total files found: {len(files)}\n")
+
+    results   = []
+    label_counts = {0: 0, 1: 0, "?": 0}
+
+    for fp in files:
+        info = inspect_file(fp)
+        if info:
+            results.append(info)
+            lbl = info["label"]
+            label_counts[lbl] = label_counts.get(lbl, 0) + 1
+
+    # ── Summary table ──────────────────────────────────────────────────────
+    section("File Summary")
+    header = f"  {'File':<40} {'Rows':>6} {'NumCols':>7} {'Label':>6} {'NaN':>5} {'Min':>10} {'Max':>10}"
+    print(header)
+    print("  " + "─" * (len(header) - 2))
+
+    for r in results:
+        label_str = {0: "control", 1: "parkinson"}.get(r["label"], "UNKNOWN")
+        nan_str   = "YES" if r["has_nan"] else "no"
+        print(
+            f"  {r['file']:<40} {r['rows']:>6} {r['cols_num']:>7} "
+            f"{label_str:>9} {nan_str:>5} {r['min']:>10} {r['max']:>10}"
+        )
+
+    # ── Class balance ──────────────────────────────────────────────────────
+    section("Class Balance")
+    log_info(f"  Parkinson (label 1) : {label_counts.get(1, 0)} file(s)")
+    log_info(f"  Control   (label 0) : {label_counts.get(0, 0)} file(s)")
+    if label_counts.get("?", 0):
+        log_warn(f"  Unknown label       : {label_counts['?']} file(s)  "
+                 "-> Check folder names match config.LABEL_RULES")
+
+    # ── Readiness check ────────────────────────────────────────────────────
+    section("Readiness Check")
+    n_windows_estimate = sum(
+        max(0, (r["rows"] - config.WINDOW_SIZE) // config.STRIDE + 1)
+        for r in results
+    )
+    log_info(f"Estimated windows (window={config.WINDOW_SIZE}, stride={config.STRIDE}): "
+             f"~{n_windows_estimate}")
+
+    short = [r["file"] for r in results if r["rows"] < config.WINDOW_SIZE]
+    if short:
+        log_warn(
+            f"{len(short)} file(s) shorter than window_size={config.WINDOW_SIZE} "
+            f"— they will be SKIPPED:\n    " + "\n    ".join(short)
+        )
+    else:
+        log_info("All files are long enough to produce at least one window. ✓")
+
+    if label_counts.get(1, 0) == 0 or label_counts.get(0, 0) == 0:
+        log_warn(
+            "Only one class detected — both 'parkinson/' and 'control/' "
+            "subfolders must exist with data."
+        )
+    else:
+        log_info("Both classes detected. ✓")
+
+    print()
+
 
 if __name__ == "__main__":
     main()

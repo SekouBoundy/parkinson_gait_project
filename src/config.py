@@ -3,6 +3,7 @@ import os
 BASE_DIR      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_DIR       = os.path.join(BASE_DIR, "data", "raw")
 PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
+EXCLUDED_FILENAMES = {"demographics.txt", "format.txt", "SHA256SUMS.txt", "README.txt"}
 
 FS           = 100
 CUTOFF_HZ    = 20

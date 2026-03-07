@@ -1,0 +1,19 @@
+# Virtual env
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Data folders
+data/raw/
+data/processed/
+
+# Large ML files
+*.npy
+*.npz
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
