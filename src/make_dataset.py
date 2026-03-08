@@ -132,6 +132,7 @@ def build_dataset(args: argparse.Namespace) -> None:
     section("Step 2 — Processing files")
     all_windows: list[np.ndarray] = []
     all_labels:  list[int]        = []
+    all_groups:  list[int]        = []   # subject/file index per window
     file_reports: list[dict]      = []
     n_success = 0
 
@@ -149,8 +150,10 @@ def build_dataset(args: argparse.Namespace) -> None:
             continue
 
         windows, label, fmeta = result
+        subject_id = n_success          # unique integer per patient file
         all_windows.append(windows)
-        all_labels.extend([label] * windows.shape[0])
+        all_labels.extend([label]      * windows.shape[0])
+        all_groups.extend([subject_id] * windows.shape[0])
         file_reports.append(fmeta)
         n_success += 1
         print(
@@ -166,8 +169,9 @@ def build_dataset(args: argparse.Namespace) -> None:
         )
 
     # ── Assemble arrays ──
-    X = np.concatenate(all_windows, axis=0)   # (N, window_size, features)
-    y = np.array(all_labels, dtype=np.int64)  # (N,)
+    X = np.concatenate(all_windows, axis=0)          # (N, window_size, features)
+    y = np.array(all_labels,  dtype=np.int64)        # (N,)
+    g = np.array(all_groups,  dtype=np.int64)        # (N,)  ← subject index
 
     validate_X_y(X, y)
 
@@ -187,6 +191,7 @@ def build_dataset(args: argparse.Namespace) -> None:
         "number_of_files": len(files),
         "files_processed": n_success,
         "total_windows":   int(X.shape[0]),
+        "num_subjects":    int(n_success),
         "class_balance":   class_balance,
         "window_size":     args.window_size,
         "stride":          args.stride,
@@ -201,8 +206,9 @@ def build_dataset(args: argparse.Namespace) -> None:
     # ── Save outputs ──
     section("Step 3 — Saving outputs")
     ensure_dir(args.processed_dir)
-    np.save(os.path.join(args.processed_dir, "X.npy"), X)
-    np.save(os.path.join(args.processed_dir, "y.npy"), y)
+    np.save(os.path.join(args.processed_dir, "X.npy"),      X)
+    np.save(os.path.join(args.processed_dir, "y.npy"),      y)
+    np.save(os.path.join(args.processed_dir, "groups.npy"), g)
     save_json(meta, os.path.join(args.processed_dir, "meta.json"))
 
     # ── Final report ──

@@ -104,10 +104,11 @@ def _parse_args() -> argparse.Namespace:
 # Data helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_arrays(processed_dir: str) -> tuple[np.ndarray, np.ndarray]:
-    """Load and validate X.npy and y.npy."""
+def load_arrays(processed_dir: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load and validate X.npy, y.npy, and groups.npy."""
     x_path = os.path.join(processed_dir, "X.npy")
     y_path = os.path.join(processed_dir, "y.npy")
+    g_path = os.path.join(processed_dir, "groups.npy")
 
     for p in [x_path, y_path]:
         if not os.path.exists(p):
@@ -116,41 +117,79 @@ def load_arrays(processed_dir: str) -> tuple[np.ndarray, np.ndarray]:
                 "  -> Run  python -m src.make_dataset  first."
             )
 
+    # groups.npy may not exist if dataset was built before this update
+    if not os.path.exists(g_path):
+        raise FileNotFoundError(
+            f"Missing: {g_path}\n"
+            "  -> Re-run  python -m src.make_dataset  to regenerate with subject IDs.\n"
+            "  This file is required for the patient-level split."
+        )
+
     X = np.load(x_path)   # (N, window_size, features)
     y = np.load(y_path)   # (N,)
-    return X, y
+    g = np.load(g_path)   # (N,)  subject index per window
+    return X, y, g
 
 
-def stratified_split(
+def patient_level_split(
     X: np.ndarray,
     y: np.ndarray,
-    val_size: float,
+    g: np.ndarray,
+    val_size:  float,
     test_size: float,
-    seed: int,
+    seed:      int,
 ) -> tuple:
     """
-    Stratified 3-way split that preserves the class ratio in every subset.
+    Split at the PATIENT level so no subject appears in more than one subset.
+
+    Why this matters
+    ----------------
+    Each patient produces ~188 windows.  A window-level shuffle lets the model
+    see patient A in both train and test — it learns that specific person's gait,
+    not the general disease pattern.  Patient-level splitting prevents this.
+
+    Strategy
+    --------
+    1. Collect one label per subject (majority vote — all windows share the same
+       label so this is always unambiguous).
+    2. Stratified-shuffle-split the *subject list* into train / val / test.
+    3. Expand back to window indices.
 
     Returns
     -------
     X_train, X_val, X_test, y_train, y_val, y_test
     """
-    # Step 1 — carve out test set
+    unique_subjects = np.unique(g)
+    # One label per subject — safe because all windows of a subject share a label
+    subject_labels = np.array([y[g == s][0] for s in unique_subjects])
+
+    # Step 1 — carve out test subjects
     sss1 = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
-    tv_idx, test_idx = next(sss1.split(X, y))
+    tv_subj_idx, test_subj_idx = next(sss1.split(unique_subjects, subject_labels))
 
-    X_tv, y_tv       = X[tv_idx],   y[tv_idx]
-    X_test, y_test   = X[test_idx], y[test_idx]
+    tv_subjects   = unique_subjects[tv_subj_idx]
+    test_subjects = unique_subjects[test_subj_idx]
+    tv_labels     = subject_labels[tv_subj_idx]
 
-    # Step 2 — split remaining into train / val
+    # Step 2 — split remaining subjects into train / val
     relative_val = val_size / (1.0 - test_size)
     sss2 = StratifiedShuffleSplit(n_splits=1, test_size=relative_val, random_state=seed)
-    train_idx, val_idx = next(sss2.split(X_tv, y_tv))
+    train_subj_idx, val_subj_idx = next(sss2.split(tv_subjects, tv_labels))
 
-    return (
-        X_tv[train_idx], X_tv[val_idx], X_test,
-        y_tv[train_idx], y_tv[val_idx], y_test,
-    )
+    train_subjects = tv_subjects[train_subj_idx]
+    val_subjects   = tv_subjects[val_subj_idx]
+
+    # Step 3 — expand to window indices
+    def windows_for(subjects):
+        mask = np.isin(g, subjects)
+        return X[mask], y[mask]
+
+    X_train, y_train = windows_for(train_subjects)
+    X_val,   y_val   = windows_for(val_subjects)
+    X_test,  y_test  = windows_for(test_subjects)
+
+    return X_train, X_val, X_test, y_train, y_val, y_test, \
+           len(train_subjects), len(val_subjects), len(test_subjects)
 
 
 def make_loader(
@@ -333,13 +372,14 @@ def main() -> None:
     # ── 1. Load data ───────────────────────────────────────────────────────
     section("Step 1 — Loading data")
     try:
-        X, y = load_arrays(args.processed_dir)
+        X, y, g = load_arrays(args.processed_dir)
     except FileNotFoundError as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)
 
-    kv("X shape", X.shape)
-    kv("y shape", y.shape)
+    kv("X shape",    X.shape)
+    kv("y shape",    y.shape)
+    kv("Subjects",   len(np.unique(g)))
     n_features = X.shape[2]
 
     unique, counts = np.unique(y, return_counts=True)
@@ -348,16 +388,20 @@ def main() -> None:
         kv(f"  label {cls} ({name})", f"{cnt} windows ({100*cnt/len(y):.1f}%)")
 
     # ── 2. Split ───────────────────────────────────────────────────────────
-    section("Step 2 — Stratified split  (70 / 15 / 15)")
-    X_train, X_val, X_test, y_train, y_val, y_test = stratified_split(
-        X, y,
-        val_size  = args.val_size,
-        test_size = args.test_size,
-        seed      = args.seed,
-    )
-    kv("Train", X_train.shape[0])
-    kv("Val",   X_val.shape[0])
-    kv("Test",  X_test.shape[0])
+    section("Step 2 — Patient-level split  (70 / 15 / 15 of SUBJECTS)")
+    print("  NOTE: splitting by subject — no patient appears in two subsets.\n")
+
+    X_train, X_val, X_test, y_train, y_val, y_test, \
+        n_train_subj, n_val_subj, n_test_subj = patient_level_split(
+            X, y, g,
+            val_size  = args.val_size,
+            test_size = args.test_size,
+            seed      = args.seed,
+        )
+
+    kv("Train", f"{X_train.shape[0]} windows  ({n_train_subj} subjects)")
+    kv("Val",   f"{X_val.shape[0]} windows  ({n_val_subj} subjects)")
+    kv("Test",  f"{X_test.shape[0]} windows  ({n_test_subj} subjects)")
 
     # ── 3. DataLoaders ─────────────────────────────────────────────────────
     section("Step 3 — Building DataLoaders")
@@ -485,9 +529,13 @@ def main() -> None:
             "weight_decay": args.weight_decay,
         },
         "split": {
-            "train": int(X_train.shape[0]),
-            "val":   int(X_val.shape[0]),
-            "test":  int(X_test.shape[0]),
+            "method":        "patient-level (no subject leakage)",
+            "train_windows": int(X_train.shape[0]),
+            "val_windows":   int(X_val.shape[0]),
+            "test_windows":  int(X_test.shape[0]),
+            "train_subjects": n_train_subj,
+            "val_subjects":   n_val_subj,
+            "test_subjects":  n_test_subj,
         },
         "test_metrics": test_metrics,
         "history":      history,
