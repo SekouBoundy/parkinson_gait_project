@@ -30,6 +30,7 @@ python -m src.preprocess_and_window --no_filter
 python tests/test_shapes.py
 #Run Train
 python -m src.train_baseline
+python -m src.train
 ```
 
 
